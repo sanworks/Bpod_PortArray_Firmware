@@ -2,7 +2,7 @@
   ----------------------------------------------------------------------------
 
   This file is part of the Sanworks Bpod_Gen2 repository
-  Copyright (C) 2018 Sanworks LLC, Stony Brook, New York, USA
+  Copyright (C) 2023 Sanworks LLC, Rochester, New York, USA
 
   ----------------------------------------------------------------------------
 
@@ -20,13 +20,17 @@
 */
 #include "ArCOM.h" // ArCOM is a serial interface wrapper developed by Sanworks, to streamline transmission of datatypes and arrays over serial
 
+#define N_READS_PER_MEASUREMENT 20 // Number of fast digital input reads taken per channel per cycle. All must read high for the port to report 'in'.
+                                   // Averaging 20 reads fixes interference with PWM dimming, and takes only ~10 additional microseconds per refresh cycle
+
 ArCOM myUSB(Serial); // Creates an ArCOM object called myUSB, wrapping SerialUSB
 ArCOM Serial1COM(Serial1); // Creates an ArCOM object called myUART, wrapping Serial1
 
-uint32_t FirmwareVersion = 1;
+uint32_t FirmwareVersion = 2;
 char moduleName[] = "PA"; // Name of module for manual override UI and state machine assembler
 char* eventNames[] = {"Port1In", "Port1Out", "Port2In", "Port2Out", "Port3In", "Port3Out", "Port4In", "Port4Out"};
 byte nEventNames = (sizeof(eventNames)/sizeof(char *));
+byte StateMachineSerialBuf[192] = {0}; // Extra memory for state machine serial buffer
 
 byte opCode = 0; 
 byte opSource = 0;
@@ -57,12 +61,13 @@ union {
 
 void setup() {
   Serial1.begin(1312500); 
+  Serial1.addMemoryForRead(StateMachineSerialBuf, 192);
   for (int i = 0; i < 4; i++) {
     pinMode(inputChannels[i], INPUT_PULLDOWN);
     pinMode(valveChannels[i], OUTPUT);
     digitalWrite(valveChannels[i], 0);
     pinMode(ledChannels[i], OUTPUT);
-    analogWriteFrequency(i, 50000); // Set LED PWM frequency (for dimming) to 50kHz
+    analogWriteFrequency(ledChannels[i], 50000); // Set LED PWM frequency (for dimming) to 50kHz
     analogWrite(ledChannels[i], 0);
     pinMode(13, OUTPUT); 
     digitalWrite(13, HIGH); // Turn on the board LED (as a power indicator)
@@ -140,7 +145,7 @@ void loop() {
         newValue = readByteFromSource(opSource);
         for (int i = 0; i < 4; i++) {
           if (bitRead(newValue, i)) {
-            analogWrite(ledChannels[i], 255);
+            analogWrite(ledChannels[i], 256);
           } else {
             analogWrite(ledChannels[i], 0);
           }
@@ -165,7 +170,14 @@ void loop() {
   newEvent = false;
   usbEventBuffer.uint64[1] = 0; // Clear event portion of buffer
   for (int i = 0; i < 4; i++) {
-    inputState[i] = digitalRead(inputChannels[i]);
+    byte readCount = 0;
+    for (int j = 0; j < N_READS_PER_MEASUREMENT; j++) {
+      readCount += digitalReadFast(inputChannels[i]);
+    }
+    inputState[i] = LOW;
+    if (readCount > N_READS_PER_MEASUREMENT/2) {
+      inputState[i] = HIGH;
+    }
     if (inputState[i] == HIGH) {
       if (lastInputState[i] == LOW) {
         Serial1COM.writeByte(thisEvent);
@@ -219,4 +231,3 @@ void returnModuleInfo() {
   }
   Serial1COM.writeByte(0); // 1 if more info follows, 0 if not
 }
-
